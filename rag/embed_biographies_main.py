@@ -4,7 +4,7 @@ from utils.data_loader import load_biographies
 from rag.db import get_qdrant_client, ensure_biographies_collection, BIO_COLLECTION
 from rag.embed import embed_biographies
 
-DATA_PATH = os.path.join(os.path.dirname(__file__), '../data/biographies.md')
+DATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'raw', 'biographies.md'))
 
 if __name__ == "__main__":
     print("Loading biographies...")
