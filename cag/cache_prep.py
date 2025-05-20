@@ -49,6 +49,44 @@ def preprocess_knowledge(model, tokenizer, prompt):
         )
     return outputs.past_key_values
 
+def prepare_kvcache(model, tokenizer, documents, filepath, answer_instruction=None):
+    # Prepare the knowledges kvcache
+    """
+    Prepare and save the KV cache for the given documents (FAQ).
+    Args:
+        model: HuggingFace model
+        tokenizer: HuggingFace tokenizer
+        documents: The FAQ/context string
+        filepath: Path to save the cache file
+        answer_instruction: Optional instruction for the assistant
+    Returns:
+        kv_cache: The DynamicCache object
+        prep_time: Time taken to prepare the cache (seconds)
+    """
+    if answer_instruction is None:
+        answer_instruction = "Answer the question with a super short answer."
+    prompt = f"""
+<|begin_of_text|>
+<|start_header_id|>system<|end_header_id|>
+You are an assistant for giving short answers based on given context.<|eot_id|>
+<|start_header_id|>user<|end_header_id|>
+Context information is below.
+------------------------------------------------
+{documents}
+------------------------------------------------
+{answer_instruction}
+Question:
+"""
+    # Get the knowledge cache
+    t1 = time.time()
+    kv_cache = preprocess_knowledge(model, tokenizer, prompt)
+    print("kvlenn: ", kv_cache.key_cache[0].shape[-2])
+    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+    torch.save(kv_cache, filepath)
+    t2 = time.time()
+    prep_time = t2 - t1
+    return kv_cache, prep_time
+
 if __name__ == "__main__":
     print(f"Loading model: {MODEL_NAME}")
     tokenizer, model = load_model_and_tokenizer(MODEL_NAME, HF_TOKEN)
@@ -59,3 +97,9 @@ if __name__ == "__main__":
     print(f"Loading FAQ from: {FAQ_PATH}")
     faq_text = load_company_faq(FAQ_PATH)
     print(f"Loaded FAQ length: {len(faq_text)} characters") 
+
+    # Step: Prepare and save the KV cache for the FAQ
+    cache_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data_cache', 'cache_knowledges.pt'))
+    print(f"Preparing KV cache and saving to: {cache_path}")
+    kv_cache, prep_time = prepare_kvcache(model, tokenizer, faq_text, cache_path)
+    print(f"KV cache prepared and saved. Preparation time: {prep_time:.2f} seconds") 
