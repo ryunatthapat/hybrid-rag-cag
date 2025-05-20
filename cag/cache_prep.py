@@ -26,7 +26,7 @@ def load_model_and_tokenizer(model_name, hf_token):
         low_cpu_mem_usage=True,
         token=hf_token
         ).cpu()
-    disk_offload(model, offload_dir="offload")
+    # disk_offload(model, offload_dir="offload")  # Removed to avoid meta tensor error
     return tokenizer, model
 
 def preprocess_knowledge(model, tokenizer, prompt):
@@ -111,19 +111,38 @@ def generate_answer_with_cache(model, tokenizer, question, kv_cache, answer_inst
 """
     device = model.device if hasattr(model, 'device') else torch.device('cpu')
     input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    # Clean up the cache to the original length if needed (optional, not implemented here)
     with torch.no_grad():
-        outputs = model(
-            input_ids=input_ids,
-            past_key_values=kv_cache,
-            use_cache=True,
-            device_map=device,
-            max_new_tokens=max_new_tokens
-        )
-    # Only decode the newly generated tokens
-    generated_ids = outputs["logits"].argmax(dim=-1)
-    answer = tokenizer.decode(generated_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+        output = generate_with_cache(model, input_ids, kv_cache, max_new_tokens=max_new_tokens)
+    answer = tokenizer.decode(output[0], skip_special_tokens=True, temperature=None)
     return answer.strip()
+
+def generate_with_cache(model, input_ids, past_key_values, max_new_tokens=50):
+    device = model.device if hasattr(model, 'device') else torch.device('cpu')
+    input_ids = input_ids.to(device)
+    output_ids = input_ids.clone()
+    next_token = input_ids
+    for _ in range(max_new_tokens):
+        outputs = model(
+            input_ids=next_token,
+            past_key_values=past_key_values,
+            use_cache=True
+        )
+        next_token_logits = outputs.logits[:, -1, :]
+        next_token = next_token_logits.argmax(dim=-1).unsqueeze(-1)
+        next_token = next_token.to(device)
+        
+        past_key_values = outputs.past_key_values
+        
+        output_ids = torch.cat([output_ids, next_token], dim=1)
+        
+        if next_token.item() == model.config.eos_token_id:
+            break
+    return output_ids[:, input_ids.shape[-1]:]
+
+def clean_up(kv, origin_len):
+    for i in range(len(kv.key_cache)):
+        kv.key_cache[i] = kv.key_cache[i][:, :, :origin_len, :]
+        kv.value_cache[i] = kv.value_cache[i][:, :, :origin_len, :]
 
 if __name__ == "__main__":
     print(f"Loading model: {MODEL_NAME}")
@@ -143,12 +162,16 @@ if __name__ == "__main__":
     kv_cache, prep_time = prepare_kvcache(model, tokenizer, faq_text, cache_path)
     print(f"KV cache prepared and saved. Preparation time: {prep_time:.2f} seconds") 
 
+    # Compute the original context length for cache truncation
+    origin_len = kv_cache.key_cache[0].shape[-2]
+
     # Sample questions
     questions = [
         "what is PALO IT?",
         "what technical stacks PALO can offer?"
     ]
     for i, q in enumerate(questions, 1):
+        clean_up(kv_cache, origin_len)
         print(f"\nQ{i}: {q}")
         answer = generate_answer_with_cache(model, tokenizer, q, kv_cache)
         print(f"A{i}: {answer}")
