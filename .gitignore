@@ -1,6 +1,6 @@
-CAG/
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .env
+offload/
