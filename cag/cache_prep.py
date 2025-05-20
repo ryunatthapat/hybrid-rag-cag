@@ -5,6 +5,9 @@ from accelerate import disk_offload
 from utils.data_loader import load_company_faq
 from dotenv import load_dotenv
 from transformers.cache_utils import DynamicCache
+import time
+
+torch.serialization.add_safe_globals([DynamicCache])
 
 load_dotenv()
 
@@ -87,6 +90,41 @@ Question:
     prep_time = t2 - t1
     return kv_cache, prep_time
 
+def generate_answer_with_cache(model, tokenizer, question, kv_cache, answer_instruction=None, max_new_tokens=128):
+    """
+    Generate an answer to the question using the precomputed FAQ KV cache.
+    Args:
+        model: HuggingFace model
+        tokenizer: HuggingFace tokenizer
+        question: User question (string)
+        kv_cache: DynamicCache object (precomputed FAQ context)
+        answer_instruction: Optional instruction for the assistant
+        max_new_tokens: Maximum number of tokens to generate
+    Returns:
+        answer: The generated answer (string)
+    """
+    if answer_instruction is None:
+        answer_instruction = "Answer the question with a super short answer."
+    prompt = f"""
+{question}<|eot_id|>
+<|start_header_id|>assistant<|end_header_id|>
+"""
+    device = model.device if hasattr(model, 'device') else torch.device('cpu')
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
+    # Clean up the cache to the original length if needed (optional, not implemented here)
+    with torch.no_grad():
+        outputs = model(
+            input_ids=input_ids,
+            past_key_values=kv_cache,
+            use_cache=True,
+            device_map=device,
+            max_new_tokens=max_new_tokens
+        )
+    # Only decode the newly generated tokens
+    generated_ids = outputs["logits"].argmax(dim=-1)
+    answer = tokenizer.decode(generated_ids[0][input_ids.shape[-1]:], skip_special_tokens=True)
+    return answer.strip()
+
 if __name__ == "__main__":
     print(f"Loading model: {MODEL_NAME}")
     tokenizer, model = load_model_and_tokenizer(MODEL_NAME, HF_TOKEN)
@@ -100,6 +138,17 @@ if __name__ == "__main__":
 
     # Step: Prepare and save the KV cache for the FAQ
     cache_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data_cache', 'cache_knowledges.pt'))
+    
     print(f"Preparing KV cache and saving to: {cache_path}")
     kv_cache, prep_time = prepare_kvcache(model, tokenizer, faq_text, cache_path)
     print(f"KV cache prepared and saved. Preparation time: {prep_time:.2f} seconds") 
+
+    # Sample questions
+    questions = [
+        "what is PALO IT?",
+        "what technical stacks PALO can offer?"
+    ]
+    for i, q in enumerate(questions, 1):
+        print(f"\nQ{i}: {q}")
+        answer = generate_answer_with_cache(model, tokenizer, q, kv_cache)
+        print(f"A{i}: {answer}")
