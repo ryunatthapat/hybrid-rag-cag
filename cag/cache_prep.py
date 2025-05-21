@@ -1,13 +1,10 @@
 import os
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from accelerate import disk_offload
+from transformers.cache_utils import DynamicCache
 from utils.data_loader import load_company_faq
 from dotenv import load_dotenv
-from transformers.cache_utils import DynamicCache
 import time
-
-torch.serialization.add_safe_globals([DynamicCache])
 
 load_dotenv()
 
@@ -15,163 +12,94 @@ MODEL_NAME = os.getenv("HF_MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.1")
 HF_TOKEN = os.getenv("HF_TOKEN")
 FAQ_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'raw', 'company-faq.md'))
 
-def get_device():
-    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+def get_device_and_dtype():
+    if torch.cuda.is_available():
+        return torch.device("cuda"), torch.float16
+    else:
+        return torch.device("cpu"), torch.float32
 
 def load_model_and_tokenizer(model_name, hf_token):
-    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token)
+    device, dtype = get_device_and_dtype()
+    tokenizer = AutoTokenizer.from_pretrained(model_name, token=hf_token, trust_remote_code=True)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch.float16,
-        low_cpu_mem_usage=True,
+        torch_dtype=dtype,
+        device_map="auto",
+        trust_remote_code=True,
         token=hf_token
-        ).cpu()
-    # disk_offload(model, offload_dir="offload")  # Removed to avoid meta tensor error
-    return tokenizer, model
+    )
+    model.to(device)
+    return tokenizer, model, device
 
-def preprocess_knowledge(model, tokenizer, prompt):
-    """
-    Prepare knowledge KV cache for CAG.
-    Args:
-        model: HuggingFace model
-        tokenizer: HuggingFace tokenizer
-        prompt: The knowledge to preprocess (string)
-    Returns:
-        DynamicCache: KV Cache
-    """
-    device = model.device if hasattr(model, 'device') else torch.device('cpu')
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    past_key_values = DynamicCache()
+def get_kv_cache(model, tokenizer, prompt: str) -> DynamicCache:
+    device = model.model.embed_tokens.weight.device
+    input_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+    cache = DynamicCache()
     with torch.no_grad():
-        outputs = model(
-            input_ids=input_ids,
-            past_key_values=past_key_values,
-            use_cache=True,
-            output_attentions=False,
-            output_hidden_states=False
-        )
-    return outputs.past_key_values
+        _ = model(input_ids=input_ids, past_key_values=cache, use_cache=True)
+    return cache, input_ids.shape[-1]
 
-def prepare_kvcache(model, tokenizer, documents, filepath, answer_instruction=None):
-    # Prepare the knowledges kvcache
-    """
-    Prepare and save the KV cache for the given documents (FAQ).
-    Args:
-        model: HuggingFace model
-        tokenizer: HuggingFace tokenizer
-        documents: The FAQ/context string
-        filepath: Path to save the cache file
-        answer_instruction: Optional instruction for the assistant
-    Returns:
-        kv_cache: The DynamicCache object
-        prep_time: Time taken to prepare the cache (seconds)
-    """
-    if answer_instruction is None:
-        answer_instruction = "Answer the question with a super short answer."
-    prompt = f"""
-<|begin_of_text|>
-<|start_header_id|>system<|end_header_id|>
-You are an assistant for giving short answers based on given context.<|eot_id|>
-<|start_header_id|>user<|end_header_id|>
-Context information is below.
-------------------------------------------------
-{documents}
-------------------------------------------------
-{answer_instruction}
-Question:
-"""
-    # Get the knowledge cache
-    t1 = time.time()
-    kv_cache = preprocess_knowledge(model, tokenizer, prompt)
-    print("kvlenn: ", kv_cache.key_cache[0].shape[-2])
-    os.makedirs(os.path.dirname(filepath), exist_ok=True)
-    torch.save(kv_cache, filepath)
-    t2 = time.time()
-    prep_time = t2 - t1
-    return kv_cache, prep_time
+def clean_up(cache: DynamicCache, origin_len: int):
+    for i in range(len(cache.key_cache)):
+        cache.key_cache[i] = cache.key_cache[i][:, :, :origin_len, :]
+        cache.value_cache[i] = cache.value_cache[i][:, :, :origin_len, :]
 
-def generate_answer_with_cache(model, tokenizer, question, kv_cache, answer_instruction=None, max_new_tokens=128):
-    """
-    Generate an answer to the question using the precomputed FAQ KV cache.
-    Args:
-        model: HuggingFace model
-        tokenizer: HuggingFace tokenizer
-        question: User question (string)
-        kv_cache: DynamicCache object (precomputed FAQ context)
-        answer_instruction: Optional instruction for the assistant
-        max_new_tokens: Maximum number of tokens to generate
-    Returns:
-        answer: The generated answer (string)
-    """
-    if answer_instruction is None:
-        answer_instruction = "Answer the question with a super short answer."
-    prompt = f"""
-{question}<|eot_id|>
-<|start_header_id|>assistant<|end_header_id|>
-"""
-    device = model.device if hasattr(model, 'device') else torch.device('cpu')
-    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(device)
-    with torch.no_grad():
-        output = generate_with_cache(model, input_ids, kv_cache, max_new_tokens=max_new_tokens)
-    answer = tokenizer.decode(output[0], skip_special_tokens=True, temperature=None)
-    return answer.strip()
-
-def generate_with_cache(model, input_ids, past_key_values, max_new_tokens=50):
-    device = model.device if hasattr(model, 'device') else torch.device('cpu')
+def generate(model, input_ids, past_key_values, max_new_tokens=128):
+    device = model.model.embed_tokens.weight.device
+    origin_len = input_ids.shape[-1]
     input_ids = input_ids.to(device)
     output_ids = input_ids.clone()
     next_token = input_ids
-    for _ in range(max_new_tokens):
-        outputs = model(
-            input_ids=next_token,
-            past_key_values=past_key_values,
-            use_cache=True
-        )
-        next_token_logits = outputs.logits[:, -1, :]
-        next_token = next_token_logits.argmax(dim=-1).unsqueeze(-1)
-        next_token = next_token.to(device)
-        
-        past_key_values = outputs.past_key_values
-        
-        output_ids = torch.cat([output_ids, next_token], dim=1)
-        
-        if next_token.item() == model.config.eos_token_id:
-            break
-    return output_ids[:, input_ids.shape[-1]:]
-
-def clean_up(kv, origin_len):
-    for i in range(len(kv.key_cache)):
-        kv.key_cache[i] = kv.key_cache[i][:, :, :origin_len, :]
-        kv.value_cache[i] = kv.value_cache[i][:, :, :origin_len, :]
+    with torch.no_grad():
+        for _ in range(max_new_tokens):
+            out = model(input_ids=next_token, past_key_values=past_key_values, use_cache=True)
+            logits = out.logits[:, -1, :]
+            token = torch.argmax(logits, dim=-1, keepdim=True)
+            output_ids = torch.cat([output_ids, token], dim=-1)
+            past_key_values = out.past_key_values
+            next_token = token.to(device)
+            if model.config.eos_token_id is not None and token.item() == model.config.eos_token_id:
+                break
+    return output_ids[:, origin_len:]
 
 if __name__ == "__main__":
-    print(f"Loading model: {MODEL_NAME}")
-    tokenizer, model = load_model_and_tokenizer(MODEL_NAME, HF_TOKEN)
-    device = get_device()
+    print(f"Loading modellll: {MODEL_NAME}")
+    tokenizer, model, device = load_model_and_tokenizer(MODEL_NAME, HF_TOKEN)
     print(f"Using device: {device}")
-    model.to_empty(device=device)
+    print(f"Tokenizer name: {getattr(tokenizer, 'name_or_path', str(tokenizer))}")
+    print(f"Model name: {getattr(model, 'name_or_path', str(model))}")
 
     print(f"Loading FAQ from: {FAQ_PATH}")
     faq_text = load_company_faq(FAQ_PATH)
-    print(f"Loaded FAQ length: {len(faq_text)} characters") 
+    print(f"Loaded FAQ length: {len(faq_text)} characters")
 
-    # Step: Prepare and save the KV cache for the FAQ
-    cache_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data_cache', 'cache_knowledges.pt'))
-    
-    print(f"Preparing KV cache and saving to: {cache_path}")
-    kv_cache, prep_time = prepare_kvcache(model, tokenizer, faq_text, cache_path)
-    print(f"KV cache prepared and saved. Preparation time: {prep_time:.2f} seconds") 
+    # --- Prepare knowledge prompt for Mistral ---
+    system_prompt = f"""
+        <|system|>
+        You are an assistant who provides concise answers.
+        <|user|>
+        Context:
+        {faq_text}
+        Question:
+        """.strip()
 
-    # Compute the original context length for cache truncation
-    origin_len = kv_cache.key_cache[0].shape[-2]
+    print("Building KV cache for FAQ...")
+    t1 = time.time()
+    kv_cache, origin_len = get_kv_cache(model, tokenizer, system_prompt)
+    t2 = time.time()
+    print(f"KV cache built. Length: {origin_len}. Time: {t2-t1:.2f}s")
 
-    # Sample questions
+    # --- Answer questions using the cache ---
     questions = [
         "what is PALO IT?",
-        "what technical stacks PALO can offer?"
+        "how can I contact PALO IT?",
+        "Where is PALO IT headquartered?",
+        "What are some of the employee benefits at PALO IT?"
     ]
     for i, q in enumerate(questions, 1):
         clean_up(kv_cache, origin_len)
         print(f"\nQ{i}: {q}")
-        answer = generate_answer_with_cache(model, tokenizer, q, kv_cache)
+        input_ids = tokenizer(q + "\n", return_tensors="pt").input_ids.to(device)
+        output_ids = generate(model, input_ids, kv_cache, max_new_tokens=300)
+        answer = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         print(f"A{i}: {answer}")
