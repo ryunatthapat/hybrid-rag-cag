@@ -11,7 +11,7 @@ torch.serialization.add_safe_globals([DynamicCache])
 
 load_dotenv()
 
-MODEL_NAME = os.getenv("HF_MODEL_NAME", "meta-llama/Llama-3.1-8B-Instruct")
+MODEL_NAME = os.getenv("HF_MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.1")
 HF_TOKEN = os.getenv("HF_TOKEN")
 FAQ_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'data', 'raw', 'company-faq.md'))
 
