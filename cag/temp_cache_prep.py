@@ -6,8 +6,6 @@ from utils.data_loader import load_company_faq
 from dotenv import load_dotenv
 import time
 
-# --- CAG with Mistral-7B-Instruct ---
-
 load_dotenv()
 
 MODEL_NAME = os.getenv("HF_MODEL_NAME", "mistralai/Mistral-7B-Instruct-v0.1")
@@ -65,7 +63,7 @@ def generate(model, input_ids, past_key_values, max_new_tokens=128):
     return output_ids[:, origin_len:]
 
 if __name__ == "__main__":
-    print(f"Loading model: {MODEL_NAME}")
+    print(f"Loading modellll: {MODEL_NAME}")
     tokenizer, model, device = load_model_and_tokenizer(MODEL_NAME, HF_TOKEN)
     print(f"Using device: {device}")
     print(f"Tokenizer name: {getattr(tokenizer, 'name_or_path', str(tokenizer))}")
@@ -78,7 +76,7 @@ if __name__ == "__main__":
     # --- Prepare knowledge prompt for Mistral ---
     system_prompt = f"""
 <|system|>
-You are an assistant who provides concise factual answers.
+You are an assistant who provides concise answers.
 <|user|>
 Context:
 {faq_text}
@@ -94,12 +92,13 @@ Question:
     # --- Answer questions using the cache ---
     questions = [
         "what is PALO IT?",
+        "How to contact PALO IT?",
         "what technical stacks PALO can offer?"
     ]
     for i, q in enumerate(questions, 1):
         clean_up(kv_cache, origin_len)
         print(f"\nQ{i}: {q}")
         input_ids = tokenizer(q + "\n", return_tensors="pt").input_ids.to(device)
-        output_ids = generate(model, input_ids, kv_cache, max_new_tokens=128)
+        output_ids = generate(model, input_ids, kv_cache, max_new_tokens=300)
         answer = tokenizer.decode(output_ids[0], skip_special_tokens=True)
         print(f"A{i}: {answer}")
