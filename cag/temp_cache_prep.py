@@ -92,8 +92,9 @@ Question:
     # --- Answer questions using the cache ---
     questions = [
         "what is PALO IT?",
-        "How to contact PALO IT?",
-        "what technical stacks PALO can offer?"
+        "how can I contact PALO IT?",
+        "Where is PALO IT headquartered?",
+        "What are some of the employee benefits at PALO IT?"
     ]
     for i, q in enumerate(questions, 1):
         clean_up(kv_cache, origin_len)
