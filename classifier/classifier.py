@@ -6,8 +6,6 @@ from dotenv import load_dotenv
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-client = openai.OpenAI(api_key=OPENAI_API_KEY)
-print("OPENAI_API_KEY", OPENAI_API_KEY)
 SYSTEM_PROMPT = (
     "You are a classifier agent. Given a user query, classify it as one of the following: "
     "'biography' (if the question is about a person, employees information, experience, skills, or background)."
@@ -18,12 +16,17 @@ SYSTEM_PROMPT = (
 
 MODEL = "gpt-4o-mini"
 
+def get_openai_client():
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY not set in environment.")
+    return openai.OpenAI(api_key=OPENAI_API_KEY)
 
-def classify_query(query: str, max_retries: int = 2) -> str:
+def classify_query(query: str, max_retries: int = 2, client=None) -> str:
     """
     Classify the query as 'biography', 'faq', or 'unknown' using OpenAI.
     """
-    print("MODEL", MODEL)
+    if client is None:
+        client = get_openai_client()
     for attempt in range(max_retries):
         try:
             response = client.chat.completions.create(
