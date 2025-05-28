@@ -73,7 +73,6 @@ if __name__ == "__main__":
     faq_text = load_company_faq(FAQ_PATH)
     print(f"Loaded FAQ length: {len(faq_text)} characters")
 
-    # --- Prepare knowledge prompt for Mistral ---
     system_prompt = f"""
         <|system|>
         You are an assistant who provides concise answers.
